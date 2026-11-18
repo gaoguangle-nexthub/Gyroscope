@@ -1,0 +1,86 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Gyroscope: Build",
+            "type": "process",
+            "command": "C:/Users/GaoGuangLe/AppData/Local/stm32cube/bundles/cmake/4.4.0+st.1/bin/cmake.exe",
+            "args": [
+                "--build",
+                "${workspaceFolder}/build/Debug",
+                "--parallel"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "build",
+            "problemMatcher": [
+                {
+                    "owner": "cpp",
+                    "fileLocation": [
+                        "autoDetect",
+                        "${workspaceFolder}"
+                    ],
+                    "pattern": {
+                        "regexp": "^(.*?):(\\d+):(\\d+):\\s+(error|warning|info):\\s+(.*)$",
+                        "file": 1,
+                        "line": 2,
+                        "column": 3,
+                        "severity": 4,
+                        "message": 5
+                    }
+                },
+                {
+                    "owner": "cpp",
+                    "fileLocation": [
+                        "autoDetect",
+                        "${workspaceFolder}"
+                    ],
+                    "pattern": {
+                        "regexp": "^(.*?):(\\d+):\\s+(error|warning|info):\\s+(.*)$",
+                        "file": 1,
+                        "line": 2,
+                        "severity": 3,
+                        "message": 4
+                    }
+                }
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "clear": true
+            }
+        },
+        {
+            "label": "Gyroscope: Build, Flash and Verify (DAPLink)",
+            "type": "process",
+            "command": "C:/Users/GaoGuangLe/AppData/Local/Programs/openocd-xpack/0.12.0-7/xpack-openocd-0.12.0-7/bin/openocd.exe",
+            "args": [
+                "-f",
+                "interface/cmsis-dap.cfg",
+                "-c",
+                "transport select swd",
+                "-c",
+                "adapter speed 1000",
+                "-f",
+                "target/stm32f1x.cfg",
+                "-c",
+                "program {${workspaceFolder}/build/Debug/Gyroscope.elf} verify reset exit"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "dependsOn": "Gyroscope: Build",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "clear": true
+            }
+        }
+    ]
+}
