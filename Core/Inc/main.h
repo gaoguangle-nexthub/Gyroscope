@@ -57,6 +57,8 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define GYRO_CS_Pin GPIO_PIN_12
+#define GYRO_CS_GPIO_Port GPIOB
 #define LEDT1_Pin GPIO_PIN_9
 #define LEDT1_GPIO_Port GPIOB
 

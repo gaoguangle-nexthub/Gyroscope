@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "spi.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
@@ -33,6 +34,15 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
+/* 课程要求每 500 ms 发送一次测试字节。 */
+#define SPI_TEST_INTERVAL_MS   500U
+
+/* 课程要求发送的单字节测试数据。 */
+#define SPI_TEST_DATA          0xAAU
+
+/* 轮询间隔用于兼顾定时精度和 CPU 占用。 */
+#define MAIN_LOOP_DELAY_MS     1U
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -43,6 +53,12 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
+
+/* SPI 发送成功次数，可在调试器 Watch 窗口中检查。 */
+static volatile uint32_t g_spi_ok_count = 0U;
+
+/* SPI 发送失败次数，用于排查 HAL 传输错误。 */
+static volatile uint32_t g_spi_error_count = 0U;
 
 /* USER CODE END PV */
 
@@ -86,7 +102,11 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_SPI2_Init();
   /* USER CODE BEGIN 2 */
+
+  /* 给 XV7001BB 的 VDDM 留出手册要求的最小 1 ms 上电稳定时间。 */
+  HAL_Delay(1U);
 
   /* USER CODE END 2 */
 
@@ -94,8 +114,28 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    HAL_GPIO_TogglePin(LEDT1_GPIO_Port, LEDT1_Pin);
-    HAL_Delay(500);
+    static uint32_t last_action_tick = 0U;
+    uint32_t current_tick = HAL_GetTick();
+
+    /* 每 500 ms 通过 SPI2 发送一次 0xAA，并同步翻转 PB9。 */
+    if ((uint32_t)(current_tick - last_action_tick) >= SPI_TEST_INTERVAL_MS)
+    {
+      HAL_GPIO_TogglePin(LEDT1_GPIO_Port, LEDT1_Pin);
+
+      if (SPI_SendByte(SPI_TEST_DATA) == HAL_OK)
+      {
+        g_spi_ok_count++;
+      }
+      else
+      {
+        g_spi_error_count++;
+      }
+
+      /* 固定增加周期，避免循环抖动导致发送间隔逐次漂移。 */
+      last_action_tick += SPI_TEST_INTERVAL_MS;
+    }
+
+    HAL_Delay(MAIN_LOOP_DELAY_MS);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -115,10 +155,13 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -128,12 +171,12 @@ void SystemClock_Config(void)
   */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
   {
     Error_Handler();
   }
