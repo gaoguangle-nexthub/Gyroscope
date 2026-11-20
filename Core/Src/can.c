@@ -276,11 +276,6 @@ HAL_StatusTypeDef CAN_SendStandard(uint16_t standard_id,
   return status;
 }
 
-HAL_StatusTypeDef CAN_SendByte(uint8_t value)
-{
-  return CAN_SendStandard(CAN_TEST_STANDARD_ID, &value, 1U);
-}
-
 bool CAN_PollReceive(CAN_Frame_t *frame)
 {
   CAN_RxHeaderTypeDef rx_header = {0};
@@ -336,7 +331,6 @@ void CAN_ReceiveTask(void)
     }
 
     g_can_last_rx_data = g_can_last_rx_payload[0];
-    __NOP();
   }
 }
 

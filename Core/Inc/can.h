@@ -39,10 +39,6 @@ extern CAN_HandleTypeDef hcan;
 
 /* USER CODE BEGIN Private defines */
 
-/* 课程 CAN 测试帧参数。 */
-#define CAN_TEST_STANDARD_ID   0x123U
-#define CAN_TEST_DATA          0xAAU
-
 /* USER CODE END Private defines */
 
 void MX_CAN_Init(void);
@@ -106,11 +102,6 @@ HAL_StatusTypeDef CAN_AppInit(void);
 HAL_StatusTypeDef CAN_SendStandard(uint16_t standard_id,
                                    const uint8_t *data,
                                    uint8_t length);
-
-/**
- * @brief 使用课程测试 ID 发送一个字节。
- */
-HAL_StatusTypeDef CAN_SendByte(uint8_t value);
 
 /**
  * @brief 从 RX FIFO0 读取一帧，不等待。

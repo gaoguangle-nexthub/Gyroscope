@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "cmsis_os.h"
 #include "can.h"
 #include "spi.h"
 #include "gpio.h"
@@ -35,15 +36,6 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
-/* 课程要求每 500 ms 发送一次测试字节。 */
-#define SPI_TEST_INTERVAL_MS   500U
-
-/* 课程要求发送的单字节测试数据。 */
-#define SPI_TEST_DATA          0xAAU
-
-/* 轮询间隔用于兼顾定时精度和 CPU 占用。 */
-#define MAIN_LOOP_DELAY_MS     1U
-
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -55,20 +47,11 @@
 
 /* USER CODE BEGIN PV */
 
-/* SPI 发送成功次数，可在调试器 Watch 窗口中检查。 */
-static volatile uint32_t g_spi_ok_count = 0U;
-
-/* SPI 发送失败次数，用于排查 HAL 传输错误。 */
-static volatile uint32_t g_spi_error_count = 0U;
-
-/* CAN 发送成功和失败次数，可在调试器 Watch 中观察。 */
-static volatile uint32_t g_can_ok_count = 0U;
-static volatile uint32_t g_can_error_count = 0U;
-
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
+void MX_FREERTOS_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -111,54 +94,20 @@ int main(void)
   MX_CAN_Init();
   /* USER CODE BEGIN 2 */
 
-  /* 给 XV7001BB 的 VDDM 留出手册要求的最小 1 ms 上电稳定时间。 */
-  HAL_Delay(1U);
-
-  if (CAN_AppInit() != HAL_OK)
-  {
-    Error_Handler();
-  }
-
   /* USER CODE END 2 */
+
+  /* Call init function for freertos objects (in cmsis_os2.c) */
+  MX_FREERTOS_Init();
+
+  /* Start scheduler */
+  osKernelStart();
+
+  /* We should never get here as control is now taken by the scheduler */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    static uint32_t last_action_tick = 0U;
-    uint32_t current_tick = HAL_GetTick();
-
-    /* 每 500 ms 通过 SPI2 和 CAN1 各发送一次 0xAA，并同步翻转 PB9。 */
-    if ((uint32_t)(current_tick - last_action_tick) >= SPI_TEST_INTERVAL_MS)
-    {
-      HAL_GPIO_TogglePin(LEDT1_GPIO_Port, LEDT1_Pin);
-
-      if (SPI_SendByte(SPI_TEST_DATA) == HAL_OK)
-      {
-        g_spi_ok_count++;
-      }
-      else
-      {
-        g_spi_error_count++;
-      }
-
-      if (CAN_SendByte(CAN_TEST_DATA) == HAL_OK)
-      {
-        g_can_ok_count++;
-      }
-      else
-      {
-        g_can_error_count++;
-      }
-
-      /* 固定增加周期，避免循环抖动导致发送间隔逐次漂移。 */
-      last_action_tick += SPI_TEST_INTERVAL_MS;
-    }
-
-    /* 裸机周期任务：处理 RX FIFO0 中所有待接收报文。 */
-    CAN_ReceiveTask();
-
-    HAL_Delay(MAIN_LOOP_DELAY_MS);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -208,6 +157,28 @@ void SystemClock_Config(void)
 /* USER CODE BEGIN 4 */
 
 /* USER CODE END 4 */
+
+/**
+  * @brief  Period elapsed callback in non blocking mode
+  * @note   This function is called  when TIM4 interrupt took place, inside
+  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+  * a global variable "uwTick" used as application time base.
+  * @param  htim : TIM handle
+  * @retval None
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  /* USER CODE BEGIN Callback 0 */
+
+  /* USER CODE END Callback 0 */
+  if (htim->Instance == TIM4)
+  {
+    HAL_IncTick();
+  }
+  /* USER CODE BEGIN Callback 1 */
+
+  /* USER CODE END Callback 1 */
+}
 
 /**
   * @brief  This function is executed in case of error occurrence.
