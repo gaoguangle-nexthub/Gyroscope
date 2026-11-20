@@ -1,0 +1,26 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug Gyroscope (DAPLink/OpenOCD)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "servertype": "openocd",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/Debug/Gyroscope.elf",
+            "device": "STM32F103C8",
+            "configFiles": [
+                "interface/cmsis-dap.cfg",
+                "target/stm32f1x.cfg"
+            ],
+            "openOCDLaunchCommands": [
+                "transport select swd",
+                "adapter speed 1000"
+            ],
+            "serverpath": "C:/Users/GaoGuangLe/AppData/Local/Programs/openocd-xpack/0.12.0-7/xpack-openocd-0.12.0-7/bin/openocd.exe",
+            "gdbPath": "C:/SysGCC/arm-eabi/bin/arm-none-eabi-gdb.exe",
+            "runToEntryPoint": "main",
+            "preLaunchTask": "Gyroscope: Build"
+        }
+    ]
+}

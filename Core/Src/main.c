@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "can.h"
 #include "spi.h"
 #include "gpio.h"
 
@@ -59,6 +60,10 @@ static volatile uint32_t g_spi_ok_count = 0U;
 
 /* SPI 发送失败次数，用于排查 HAL 传输错误。 */
 static volatile uint32_t g_spi_error_count = 0U;
+
+/* CAN 发送成功和失败次数，可在调试器 Watch 中观察。 */
+static volatile uint32_t g_can_ok_count = 0U;
+static volatile uint32_t g_can_error_count = 0U;
 
 /* USER CODE END PV */
 
@@ -103,10 +108,16 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_SPI2_Init();
+  MX_CAN_Init();
   /* USER CODE BEGIN 2 */
 
   /* 给 XV7001BB 的 VDDM 留出手册要求的最小 1 ms 上电稳定时间。 */
   HAL_Delay(1U);
+
+  if (CAN_AppInit() != HAL_OK)
+  {
+    Error_Handler();
+  }
 
   /* USER CODE END 2 */
 
@@ -117,7 +128,7 @@ int main(void)
     static uint32_t last_action_tick = 0U;
     uint32_t current_tick = HAL_GetTick();
 
-    /* 每 500 ms 通过 SPI2 发送一次 0xAA，并同步翻转 PB9。 */
+    /* 每 500 ms 通过 SPI2 和 CAN1 各发送一次 0xAA，并同步翻转 PB9。 */
     if ((uint32_t)(current_tick - last_action_tick) >= SPI_TEST_INTERVAL_MS)
     {
       HAL_GPIO_TogglePin(LEDT1_GPIO_Port, LEDT1_Pin);
@@ -131,9 +142,21 @@ int main(void)
         g_spi_error_count++;
       }
 
+      if (CAN_SendByte(CAN_TEST_DATA) == HAL_OK)
+      {
+        g_can_ok_count++;
+      }
+      else
+      {
+        g_can_error_count++;
+      }
+
       /* 固定增加周期，避免循环抖动导致发送间隔逐次漂移。 */
       last_action_tick += SPI_TEST_INTERVAL_MS;
     }
+
+    /* 裸机周期任务：处理 RX FIFO0 中所有待接收报文。 */
+    CAN_ReceiveTask();
 
     HAL_Delay(MAIN_LOOP_DELAY_MS);
     /* USER CODE END WHILE */

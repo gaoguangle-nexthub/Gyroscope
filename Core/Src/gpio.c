@@ -50,7 +50,10 @@ void MX_GPIO_Init(void)
   __HAL_RCC_GPIOA_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, GYRO_CS_Pin|LEDT1_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GYRO_CS_GPIO_Port, GYRO_CS_Pin, GPIO_PIN_SET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(LEDT1_GPIO_Port, LEDT1_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : GYRO_CS_Pin */
   GPIO_InitStruct.Pin = GYRO_CS_Pin;
