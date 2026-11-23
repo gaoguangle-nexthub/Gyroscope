@@ -19,6 +19,10 @@
             ],
             "serverpath": "C:/Users/GaoGuangLe/AppData/Local/Programs/openocd-xpack/0.12.0-7/xpack-openocd-0.12.0-7/bin/openocd.exe",
             "gdbPath": "C:/SysGCC/arm-eabi/bin/arm-none-eabi-gdb.exe",
+            "liveWatch": {
+                "enabled": true,
+                "samplesPerSecond": 5
+            },
             "runToEntryPoint": "main",
             "preLaunchTask": "Gyroscope: Build"
         }

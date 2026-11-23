@@ -20,6 +20,13 @@ static uint8_t s_initialized = 0U;
 static int32_t s_angle_microdeg = 0;
 static uint32_t s_previous_time_us = 0U;
 static uint8_t s_angle_time_valid = 0U;
+static int32_t s_bias_samples[XV7001BB_BIAS_SAMPLE_COUNT];
+static int32_t s_bias_raw = 0;
+static int32_t s_bias_sum_raw = 0;
+static uint32_t s_bias_attempt_count = 0U;
+static uint32_t s_bias_valid_count = 0U;
+static uint32_t s_bias_rejected_count = 0U;
+static uint8_t s_bias_state = XV7001BB_BIAS_STATE_IDLE;
 
 static xv_status_t xv_map_hal_status(HAL_StatusTypeDef status)
 {
@@ -164,6 +171,194 @@ static uint8_t xv_rate_is_valid(int32_t raw_rate)
   return (uint8_t)((raw_rate >= -XV7001BB_RATE_RAW_LIMIT) &&
                    (raw_rate <= XV7001BB_RATE_RAW_LIMIT));
 }
+
+static int32_t xv_saturate_rate(int32_t corrected_raw_rate)
+{
+  if (corrected_raw_rate > XV7001BB_RATE_RAW_SATURATION)
+  {
+    g_xv7001bb_debug.rate_saturation_count++;
+    return XV7001BB_RATE_RAW_SATURATION;
+  }
+  if (corrected_raw_rate < -XV7001BB_RATE_RAW_SATURATION)
+  {
+    g_xv7001bb_debug.rate_saturation_count++;
+    return -XV7001BB_RATE_RAW_SATURATION;
+  }
+  return corrected_raw_rate;
+}
+
+static void xv_reset_bias_state(void)
+{
+  s_bias_raw = 0;
+  s_bias_sum_raw = 0;
+  s_bias_attempt_count = 0U;
+  s_bias_valid_count = 0U;
+  s_bias_rejected_count = 0U;
+  s_bias_state = XV7001BB_BIAS_STATE_IDLE;
+
+  g_xv7001bb_debug.bias_sample_count = 0U;
+  g_xv7001bb_debug.bias_valid_sample_count = 0U;
+  g_xv7001bb_debug.bias_rejected_count = 0U;
+  g_xv7001bb_debug.bias_variance_raw2 = 0U;
+  g_xv7001bb_debug.bias_raw = 0;
+  g_xv7001bb_debug.bias_peak_to_peak_raw = 0;
+  g_xv7001bb_debug.bias_dps = 0.0f;
+  g_xv7001bb_debug.corrected_raw_rate = 0;
+  g_xv7001bb_debug.rate_dps = 0.0f;
+  g_xv7001bb_debug.bias_state = XV7001BB_BIAS_STATE_IDLE;
+  g_xv7001bb_debug.bias_valid = 0U;
+}
+
+static xv_status_t xv_bias_unavailable_status(void)
+{
+  if (s_bias_state == XV7001BB_BIAS_STATE_FAILED)
+  {
+    return XV_ERR_CALIBRATION_FAILED;
+  }
+  return XV_ERR_NOT_CALIBRATED;
+}
+
+static void xv_sort_bias_samples(uint32_t count)
+{
+  uint32_t index;
+
+  for (index = 1U; index < count; index++)
+  {
+    int32_t value = s_bias_samples[index];
+    uint32_t insert_index = index;
+
+    while ((insert_index > 0U) &&
+           (s_bias_samples[insert_index - 1U] > value))
+    {
+      s_bias_samples[insert_index] =
+          s_bias_samples[insert_index - 1U];
+      insert_index--;
+    }
+    s_bias_samples[insert_index] = value;
+  }
+}
+
+static void xv_complete_bias_calibration(void)
+{
+  int32_t mean_raw;
+  int32_t minimum_raw;
+  int32_t maximum_raw;
+  int32_t sample_raw;
+  int32_t delta_raw;
+  int32_t absolute_mean_raw;
+  uint64_t variance_raw2;
+  uint64_t sum_square_raw = 0U;
+  int64_t trimmed_sum_raw = 0;
+  uint32_t first_sample;
+  uint32_t end_sample;
+  uint32_t trimmed_count;
+  uint32_t index;
+
+  if (s_bias_valid_count < XV7001BB_BIAS_MIN_VALID_SAMPLES)
+  {
+    s_bias_state = XV7001BB_BIAS_STATE_FAILED;
+    s_bias_raw = 0;
+  }
+  else
+  {
+    xv_sort_bias_samples(s_bias_valid_count);
+    first_sample = s_bias_valid_count / XV7001BB_BIAS_TRIM_DIVISOR;
+    end_sample = s_bias_valid_count - first_sample;
+    trimmed_count = end_sample - first_sample;
+
+    for (index = first_sample; index < end_sample; index++)
+    {
+      trimmed_sum_raw += s_bias_samples[index];
+    }
+    if (trimmed_sum_raw >= 0)
+    {
+      mean_raw =
+          (int32_t)((trimmed_sum_raw + (trimmed_count / 2U)) /
+                    trimmed_count);
+    }
+    else
+    {
+      mean_raw =
+          (int32_t)((trimmed_sum_raw - (trimmed_count / 2U)) /
+                    trimmed_count);
+    }
+
+    minimum_raw = s_bias_samples[first_sample];
+    maximum_raw = s_bias_samples[first_sample];
+    for (index = first_sample; index < end_sample; index++)
+    {
+      sample_raw = s_bias_samples[index];
+      if (sample_raw < minimum_raw)
+      {
+        minimum_raw = sample_raw;
+      }
+      if (sample_raw > maximum_raw)
+      {
+        maximum_raw = sample_raw;
+      }
+
+      delta_raw = sample_raw - mean_raw;
+      sum_square_raw += (uint64_t)((int64_t)delta_raw * delta_raw);
+    }
+
+    variance_raw2 = sum_square_raw / trimmed_count;
+    absolute_mean_raw = (mean_raw < 0) ? -mean_raw : mean_raw;
+
+    g_xv7001bb_debug.bias_raw = mean_raw;
+    g_xv7001bb_debug.bias_peak_to_peak_raw =
+        maximum_raw - minimum_raw;
+    g_xv7001bb_debug.bias_variance_raw2 = variance_raw2;
+
+    if ((absolute_mean_raw <= XV7001BB_BIAS_MAX_OFFSET_RAW) &&
+        ((maximum_raw - minimum_raw) <=
+         XV7001BB_BIAS_MAX_PEAK_TO_PEAK_RAW) &&
+        (variance_raw2 <= XV7001BB_BIAS_MAX_VARIANCE_RAW2))
+    {
+      s_bias_raw = mean_raw;
+      s_bias_state = XV7001BB_BIAS_STATE_READY;
+    }
+    else
+    {
+      s_bias_raw = 0;
+      s_bias_state = XV7001BB_BIAS_STATE_FAILED;
+    }
+  }
+
+  g_xv7001bb_debug.bias_dps =
+      (float)g_xv7001bb_debug.bias_raw * XV7001BB_RATE_DPS_PER_LSB;
+  g_xv7001bb_debug.bias_state = s_bias_state;
+  g_xv7001bb_debug.bias_valid =
+      (uint8_t)(s_bias_state == XV7001BB_BIAS_STATE_READY);
+}
+
+static void xv_process_bias_sample(int32_t raw_rate)
+{
+  int32_t absolute_raw;
+
+  s_bias_attempt_count++;
+  absolute_raw = (raw_rate < 0) ? -raw_rate : raw_rate;
+
+  if (absolute_raw > XV7001BB_BIAS_STATIC_RAW_LIMIT)
+  {
+    s_bias_rejected_count++;
+  }
+  else
+  {
+    s_bias_samples[s_bias_valid_count] = raw_rate;
+    s_bias_valid_count++;
+    s_bias_sum_raw += raw_rate;
+  }
+
+  g_xv7001bb_debug.bias_sample_count = s_bias_attempt_count;
+  g_xv7001bb_debug.bias_valid_sample_count = s_bias_valid_count;
+  g_xv7001bb_debug.bias_rejected_count = s_bias_rejected_count;
+
+  if (s_bias_attempt_count >= XV7001BB_BIAS_SAMPLE_COUNT)
+  {
+    xv_complete_bias_calibration();
+  }
+}
+
 //寄存器地址, 要写入的值
 xv_status_t XV7001bb_WriteData(uint8_t reg, uint8_t value)
 {
@@ -291,12 +486,12 @@ xv_status_t XV7001bb_ReadTmp(float *temp_c)
   *temp_c = temperature;
   return XV_OK;
 }
-//读取的是一个数，这个数除280就是角速度
+//读取24位有符号角速度，实测有效比例因子为17920 LSB/(°/s)
 xv_status_t XV7001bb_ReadRawRate(int32_t *raw_rate)
 {
-  uint8_t tx_data[3] = {0x8AU, 0U, 0U};
-  uint8_t rx_data[3] = {0U, 0U, 0U};
-  int16_t raw16;
+  uint8_t tx_data[4] = {0x8AU, 0U, 0U, 0U};
+  uint8_t rx_data[4] = {0U, 0U, 0U, 0U};
+  uint32_t raw24;
   xv_status_t status;
 
   if (raw_rate == NULL)
@@ -309,18 +504,28 @@ xv_status_t XV7001bb_ReadRawRate(int32_t *raw_rate)
     return XV_ERR_NOT_READY;
   }
 
-  status = xv_transfer(tx_data, rx_data, 3U);
+  status = xv_transfer(tx_data, rx_data, 4U);
   if (status != XV_OK)
   {
     s_angle_time_valid = 0U;
     return status;
   }
 
-  raw16 = (int16_t)(((uint16_t)rx_data[1] << 8) |
-                    (uint16_t)rx_data[2]);
-  *raw_rate = (int32_t)raw16;
+  raw24 = ((uint32_t)rx_data[1] << 16) |
+          ((uint32_t)rx_data[2] << 8) |
+          (uint32_t)rx_data[3];
+  if ((raw24 & 0x00800000U) != 0U)
+  {
+    raw24 |= 0xFF000000U;
+  }
+  *raw_rate = (int32_t)raw24;
   g_xv7001bb_debug.raw_rate = *raw_rate;
   g_xv7001bb_debug.sample_count++;
+
+  if (s_bias_state == XV7001BB_BIAS_STATE_COLLECTING)
+  {
+    xv_process_bias_sample(*raw_rate);
+  }
 
   if (!xv_rate_is_valid(*raw_rate))
   {
@@ -329,7 +534,48 @@ xv_status_t XV7001bb_ReadRawRate(int32_t *raw_rate)
   }
   return XV_OK;
 }
-// 将原始角速度转换为角度，单位为度。
+
+xv_status_t XV7001bb_StartBiasCalibration(void)
+{
+  if (!s_initialized)
+  {
+    return XV_ERR_NOT_READY;
+  }
+
+  xv_reset_bias_state();
+  s_bias_state = XV7001BB_BIAS_STATE_COLLECTING;
+  g_xv7001bb_debug.bias_state = s_bias_state;
+
+  s_angle_microdeg = 0;
+  s_previous_time_us = 0U;
+  s_angle_time_valid = 0U;
+  g_xv7001bb_debug.angle_deg = 0.0f;
+  g_xv7001bb_debug.angle_time_valid = 0U;
+
+  return XV_OK;
+}
+
+xv_status_t XV7001bb_GetBias(float *bias_dps)
+{
+  if (bias_dps == NULL)
+  {
+    g_xv7001bb_debug.invalid_request_count++;
+    return XV_ERR_PARAM;
+  }
+  if (!s_initialized)
+  {
+    return XV_ERR_NOT_READY;
+  }
+  if (s_bias_state != XV7001BB_BIAS_STATE_READY)
+  {
+    return xv_bias_unavailable_status();
+  }
+
+  *bias_dps = (float)s_bias_raw * XV7001BB_RATE_DPS_PER_LSB;
+  return XV_OK;
+}
+
+//读取经零偏校准后的角速度，单位为 °/s。
 xv_status_t XV7001bb_ReadRate(float *rate_dps)
 {
   int32_t raw_rate;
@@ -344,18 +590,26 @@ xv_status_t XV7001bb_ReadRate(float *rate_dps)
   status = XV7001bb_ReadRawRate(&raw_rate);
   if (status == XV_OK)
   {
+    if (s_bias_state != XV7001BB_BIAS_STATE_READY)
+    {
+      return xv_bias_unavailable_status();
+    }
+
+    raw_rate = xv_saturate_rate(raw_rate - s_bias_raw);
     *rate_dps = (float)raw_rate * XV7001BB_RATE_DPS_PER_LSB;
     g_xv7001bb_debug.rate_dps = *rate_dps;
   }
   return status;
 }
-
+//将角速度积分为角度，单位为度。
 xv_status_t XV7001bb_ConvertRateToAngle(int32_t raw_rate,
                                         uint32_t sample_time_us,
                                         float *angle_deg)
 {
   uint32_t dt_us;
   int32_t delta_microdeg;
+  int64_t rate_time_product;
+  int32_t corrected_raw_rate;
 
   if (angle_deg == NULL)
   {
@@ -365,8 +619,20 @@ xv_status_t XV7001bb_ConvertRateToAngle(int32_t raw_rate,
   if ((!s_initialized) || (!xv_rate_is_valid(raw_rate)))
   {
     s_angle_time_valid = 0U;
+    g_xv7001bb_debug.rate_invalid_count++;
     return s_initialized ? XV_ERR_DATA_INVALID : XV_ERR_NOT_READY;
   }
+  if (s_bias_state != XV7001BB_BIAS_STATE_READY)
+  {
+    s_angle_time_valid = 0U;
+    g_xv7001bb_debug.angle_time_valid = 0U;
+    return xv_bias_unavailable_status();
+  }
+
+  corrected_raw_rate = xv_saturate_rate(raw_rate - s_bias_raw);
+  g_xv7001bb_debug.corrected_raw_rate = corrected_raw_rate;
+  g_xv7001bb_debug.rate_dps =
+      (float)corrected_raw_rate * XV7001BB_RATE_DPS_PER_LSB;
 
   if (!s_angle_time_valid)
   {
@@ -377,25 +643,43 @@ xv_status_t XV7001bb_ConvertRateToAngle(int32_t raw_rate,
   else
   {
     dt_us = sample_time_us - s_previous_time_us;
-    if ((dt_us == 0U) || (dt_us > XV7001BB_MAX_INTEGRATION_DT_US))
+    s_previous_time_us = sample_time_us;
+
+    if (dt_us == 0U)
     {
-      s_previous_time_us = sample_time_us;
       g_xv7001bb_debug.sample_dt_us = dt_us;
+      g_xv7001bb_debug.dt_gap_count++;
+      g_xv7001bb_debug.angle_time_valid = s_angle_time_valid;
       g_xv7001bb_debug.angle_deg =
           (float)s_angle_microdeg * XV7001BB_ANGLE_DEG_PER_UDEG;
       *angle_deg = g_xv7001bb_debug.angle_deg;
-      return XV_ERR_DATA_INVALID;
+      return XV_OK;
+    }
+    if (dt_us > XV7001BB_MAX_INTEGRATION_DT_US)
+    {
+      dt_us = XV7001BB_MAX_INTEGRATION_DT_US;
+      g_xv7001bb_debug.dt_gap_count++;
     }
 
-    s_previous_time_us = sample_time_us;
+    g_xv7001bb_debug.integration_count++;
+    if ((g_xv7001bb_debug.sample_dt_min_us == 0U) ||
+        (dt_us < g_xv7001bb_debug.sample_dt_min_us))
+    {
+      g_xv7001bb_debug.sample_dt_min_us = dt_us;
+    }
+    if (dt_us > g_xv7001bb_debug.sample_dt_max_us)
+    {
+      g_xv7001bb_debug.sample_dt_max_us = dt_us;
+    }
 
     /*
-     * raw_rate / 280 LSB/(deg/s) * dt_us / 1e6 s/turn all resolve to
-     * raw_rate * dt_us / 280 microdegrees. The bounded inputs keep this
-     * multiplication within a signed 32-bit value, avoiding software float
-     * division inside the 10 ms path on Cortex-M3.
+     * A 24-bit rate code multiplied by dt_us exceeds signed 32-bit range
+     * near full scale, so keep the product in 64 bits before scaling.
      */
-    delta_microdeg = ((int32_t)raw_rate * (int32_t)dt_us) / 280;
+    rate_time_product =
+        (int64_t)corrected_raw_rate * (int64_t)dt_us;
+    delta_microdeg =
+        (int32_t)(rate_time_product / XV7001BB_RATE_RAW_CODES_PER_DPS);
     s_angle_microdeg += delta_microdeg;
 
     if (s_angle_microdeg >= XV_ANGLE_MICRODEG_HALF_TURN)
@@ -451,9 +735,20 @@ xv_status_t XV7001bb_Init(void)
   xv_status_t status;
 
   s_initialized = 0U;
+  s_angle_microdeg = 0;
+  s_previous_time_us = 0U;
   s_angle_time_valid = 0U;
+  xv_reset_bias_state();
+  g_xv7001bb_debug.angle_deg = 0.0f;
   g_xv7001bb_debug.angle_time_valid = 0U;
   g_xv7001bb_debug.initialized = 0U;
+  g_xv7001bb_debug.integration_count = 0U;
+  g_xv7001bb_debug.dt_gap_count = 0U;
+  g_xv7001bb_debug.rate_invalid_count = 0U;
+  g_xv7001bb_debug.rate_saturation_count = 0U;
+  g_xv7001bb_debug.sample_dt_min_us = 0U;
+  g_xv7001bb_debug.sample_dt_max_us = 0U;
+  g_xv7001bb_debug.corrected_raw_rate = 0;
   g_xv7001bb_debug.init_calls++;
 
   if (!xv_spi_ready())
@@ -516,15 +811,15 @@ xv_status_t XV7001bb_Init(void)
   }
   g_xv7001bb_debug.reg_control_value = readback;
 
-  /* Keep the known-good 16-bit output format. */
-  status = XV7001bb_WriteData(XV7001BB_REG_OUTPUT_CTL, 0x01U);
+  /* Select the sensor's 24-bit rate output format. */
+  status = XV7001bb_WriteData(XV7001BB_REG_OUTPUT_CTL, 0x05U);
   if (status != XV_OK)
   {
     g_xv7001bb_debug.init_status = (uint32_t)status;
     return status;
   }
   status = XV7001bb_ReadReg(XV7001BB_REG_OUTPUT_CTL, &readback);
-  if ((status != XV_OK) || (readback != 0x01U))
+  if ((status != XV_OK) || (readback != 0x05U))
   {
     g_xv7001bb_debug.init_status =
         (uint32_t)((status == XV_OK) ? XV_ERR_IO : status);

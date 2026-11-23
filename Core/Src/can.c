@@ -23,6 +23,7 @@
 /* USER CODE BEGIN 0 */
 
 static bool can_started = false;
+static volatile bool gyro_zero_requested = false;
 volatile CAN_DebugInfo_t g_can_debug;
 
 volatile uint32_t g_can_rx_count = 0U;
@@ -276,11 +277,57 @@ HAL_StatusTypeDef CAN_SendStandard(uint16_t standard_id,
   return status;
 }
 
+HAL_StatusTypeDef CAN_SendByte(uint8_t value)
+{
+  return CAN_SendStandard(CAN_TEST_STANDARD_ID, &value, 1U);
+}
+
+HAL_StatusTypeDef CAN_SendGyroTelemetry(int32_t angle_millideg,
+                                        int16_t temperature_centi_c,
+                                        uint8_t flags,
+                                        uint8_t sequence)
+{
+  uint8_t data[8];
+  uint32_t angle_raw = (uint32_t)angle_millideg;
+  uint16_t temperature_raw = (uint16_t)temperature_centi_c;
+
+  data[0] = (uint8_t)(angle_raw & 0xFFU);
+  data[1] = (uint8_t)((angle_raw >> 8) & 0xFFU);
+  data[2] = (uint8_t)((angle_raw >> 16) & 0xFFU);
+  data[3] = (uint8_t)((angle_raw >> 24) & 0xFFU);
+  data[4] = (uint8_t)(temperature_raw & 0xFFU);
+  data[5] = (uint8_t)((temperature_raw >> 8) & 0xFFU);
+  data[6] = flags;
+  data[7] = sequence;
+
+  return CAN_SendStandard(CAN_GYRO_TELEMETRY_STANDARD_ID, data, 8U);
+}
+
+HAL_StatusTypeDef CAN_SendGyroRateTelemetry(int32_t rate_millidps,
+                                            uint8_t flags,
+                                            uint8_t sequence)
+{
+  uint8_t data[8];
+  uint32_t rate_raw = (uint32_t)rate_millidps;
+
+  data[0] = (uint8_t)(rate_raw & 0xFFU);
+  data[1] = (uint8_t)((rate_raw >> 8) & 0xFFU);
+  data[2] = (uint8_t)((rate_raw >> 16) & 0xFFU);
+  data[3] = (uint8_t)((rate_raw >> 24) & 0xFFU);
+  data[4] = 0U;
+  data[5] = 0U;
+  data[6] = flags;
+  data[7] = sequence;
+
+  return CAN_SendStandard(CAN_GYRO_RATE_STANDARD_ID, data, 8U);
+}
+
 bool CAN_PollReceive(CAN_Frame_t *frame)
 {
   CAN_RxHeaderTypeDef rx_header = {0};
 
-  if ((frame == NULL) ||
+  if ((!can_started) ||
+      (frame == NULL) ||
       (HAL_CAN_GetRxFifoFillLevel(&hcan, CAN_RX_FIFO0) == 0U))
   {
     return false;
@@ -300,13 +347,21 @@ bool CAN_PollReceive(CAN_Frame_t *frame)
   return true;
 }
 
+bool CAN_ConsumeGyroZeroRequest(void)
+{
+  bool requested = gyro_zero_requested;
+
+  gyro_zero_requested = false;
+  return requested;
+}
+
 void CAN_ReceiveTask(void)
 {
   CAN_Frame_t frame;
 
   /*
    * 只有 CAN_PollReceive() 成功取出一帧后，程序才会进入本循环。
-   * 联调时在 g_can_last_rx_data 赋值后的 __NOP() 行设置断点，
+   * 联调时在 g_can_last_rx_data 赋值后的行设置断点，
    * 此时本帧 ID、DLC 和 8 字节数据快照均已更新。
    */
   while (CAN_PollReceive(&frame))
@@ -331,6 +386,15 @@ void CAN_ReceiveTask(void)
     }
 
     g_can_last_rx_data = g_can_last_rx_payload[0];
+
+    if ((!frame.extended) &&
+        (!frame.remote) &&
+        (frame.id == CAN_GYRO_COMMAND_STANDARD_ID) &&
+        (frame.dlc >= 1U) &&
+        (frame.data[0] == CAN_GYRO_COMMAND_REZERO))
+    {
+      gyro_zero_requested = true;
+    }
   }
 }
 

@@ -36,8 +36,11 @@ extern SPI_HandleTypeDef hspi2;
 
 /* USER CODE BEGIN Private defines */
 
-/* SPI2 单次事务的默认超时时间，单位为毫秒。 */
-#define SPI_TRANSFER_TIMEOUT_MS   10U
+/*
+ * 4 字节事务在 1.125 Mbit/s 下只需约 29 us。2 ms 已提供足够余量，
+ * 同时保证 SPI 故障不会独占整个 10 ms 角度更新周期。
+ */
+#define SPI_TRANSFER_TIMEOUT_MS   2U
 
 /* USER CODE END Private defines */
 

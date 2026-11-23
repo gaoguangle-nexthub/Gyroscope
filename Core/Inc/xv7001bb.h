@@ -39,15 +39,48 @@ extern "C" {
 /* The board powers VDDM and VDDI together. Wait at least 200 ms before Init. */
 #define XV7001BB_POWER_UP_WAIT_MS      200U
 
-/* First-version configuration: 16-bit rate output and a 2nd-order 35 Hz LPF. */
-#define XV7001BB_RATE_LSB_PER_DPS       280.0f
-#define XV7001BB_RATE_DPS_PER_LSB       0.003571428571428571f
+/*
+ * 24-bit rate output with a 2nd-order 35 Hz LPF. The measured effective
+ * scale is 17920 LSB/(deg/s), equivalent to 70 LSB/(deg/s) in 16-bit form.
+ */
+#define XV7001BB_RATE_RAW_CODES_PER_DPS 17920
+#define XV7001BB_RATE_DPS_PER_LSB       0.00005580357142857143f
 #define XV7001BB_TEMP_C_PER_LSB         0.0625f
 #define XV7001BB_ANGLE_DEG_PER_UDEG     0.000001f
 
-/* Reject abnormal samples and integration gaps while permitting scheduler jitter. */
-#define XV7001BB_RATE_RAW_LIMIT         30000
+/*
+ * The sensor has a rated range of +/-100 deg/s. Accept every signed 24-bit
+ * rate code, then clamp over-range readings to the rated full scale so that
+ * angle integration continues at the maximum measurable rate.
+ */
+#define XV7001BB_RATE_RAW_LIMIT         8388608
+#define XV7001BB_RATE_RAW_SATURATION    (XV7001BB_RATE_RAW_CODES_PER_DPS * 100)
 #define XV7001BB_MAX_INTEGRATION_DT_US  50000U
+
+/*
+ * XV7001BB has no usable hardware zero-rate calibration command. Collect
+ * 5 s of stationary samples at the application's 100 Hz cadence and require
+ * at least 90% of them to pass the static and dispersion checks.
+ */
+#define XV7001BB_BIAS_SAMPLE_COUNT              500U
+#define XV7001BB_BIAS_MIN_VALID_SAMPLES         450U
+#define XV7001BB_BIAS_TRIM_DIVISOR              10U
+#define XV7001BB_BIAS_SETTLE_MS                 1000U
+/*
+ * Raw-code equivalents of 7 deg/s per-sample and peak-to-peak limits,
+ * 5 deg/s mean offset, and 1 deg/s RMS. The mean limit still covers
+ * the specified temperature bias range, while the dispersion limits reject
+ * slow motion that was previously wide enough to pass calibration.
+ */
+#define XV7001BB_BIAS_STATIC_RAW_LIMIT          125440
+#define XV7001BB_BIAS_MAX_OFFSET_RAW            89600
+#define XV7001BB_BIAS_MAX_PEAK_TO_PEAK_RAW      125440
+#define XV7001BB_BIAS_MAX_VARIANCE_RAW2         321126400ULL
+
+#define XV7001BB_BIAS_STATE_IDLE                0U
+#define XV7001BB_BIAS_STATE_COLLECTING          1U
+#define XV7001BB_BIAS_STATE_READY               2U
+#define XV7001BB_BIAS_STATE_FAILED              3U
 
 typedef enum
 {
@@ -57,7 +90,9 @@ typedef enum
   XV_ERR_TIMEOUT,
   XV_ERR_BUSY,
   XV_ERR_NOT_READY,
-  XV_ERR_DATA_INVALID
+  XV_ERR_DATA_INVALID,
+  XV_ERR_NOT_CALIBRATED,
+  XV_ERR_CALIBRATION_FAILED
 } xv_status_t;
 
 typedef struct
@@ -70,9 +105,23 @@ typedef struct
   uint32_t sample_count;
   uint32_t sample_time_us;
   uint32_t sample_dt_us;
+  uint32_t integration_count;
+  uint32_t dt_gap_count;
+  uint32_t rate_invalid_count;
+  uint32_t rate_saturation_count;
+  uint32_t sample_dt_min_us;
+  uint32_t sample_dt_max_us;
+  uint32_t bias_sample_count;
+  uint32_t bias_valid_sample_count;
+  uint32_t bias_rejected_count;
   uint32_t raw_temperature;
+  uint64_t bias_variance_raw2;
   int32_t raw_rate;
+  int32_t corrected_raw_rate;
+  int32_t bias_raw;
+  int32_t bias_peak_to_peak_raw;
   float rate_dps;
+  float bias_dps;
   float temperature_c;
   float angle_deg;
   uint8_t status_raw;
@@ -86,37 +135,11 @@ typedef struct
   uint8_t reg_filter_value;
   uint8_t initialized;
   uint8_t angle_time_valid;
+  uint8_t bias_state;
+  uint8_t bias_valid;
 } xv7001bb_debug_t;
 
-typedef struct
-{
-  uint32_t init_status;
-  uint32_t write_test_status;
-  uint32_t read_status_status;
-  uint32_t read_reg_control_status;
-  uint32_t read_reg_output_status;
-  uint32_t read_reg_filter_status;
-  uint32_t read_tmp_status;
-  uint32_t read_raw_rate_status;
-  uint32_t read_rate_status;
-  uint32_t read_angle_status;
-  uint32_t interface_check_complete;
-  uint32_t loop_count;
-  uint32_t period_ticks;
-  uint32_t period_ticks_max;
-  uint32_t error_count;
-  uint8_t status_raw;
-  uint8_t interface_ctl;
-  uint8_t output_ctl;
-  uint8_t filter_ctl;
-  int32_t raw_rate;
-  float temperature_c;
-  float rate_dps;
-  float angle_deg;
-} xv7001bb_task_debug_t;
-
 extern volatile xv7001bb_debug_t g_xv7001bb_debug;
-extern volatile xv7001bb_task_debug_t g_xv7001bb_task_debug;
 
 /**
   * @brief Initialize the sensor after the caller has supplied the power-up delay.
@@ -130,13 +153,28 @@ xv_status_t XV7001bb_ReadStatus(uint8_t *status);
 xv_status_t XV7001bb_SendCommand(uint8_t command);
 xv_status_t XV7001bb_ReadTmp(float *temp_c);
 xv_status_t XV7001bb_ReadRawRate(int32_t *raw_rate);
+
+/**
+  * @brief Start a stationary zero-rate bias calibration.
+  * @note The mechanism must remain stationary while 500 samples are collected.
+  *       Calling this function clears the accumulated angle.
+  */
+xv_status_t XV7001bb_StartBiasCalibration(void);
+
+/** @brief Return the calibrated bias in degrees per second. */
+xv_status_t XV7001bb_GetBias(float *bias_dps);
+
+/** @brief Read calibrated angular rate after the bias has been removed. */
 xv_status_t XV7001bb_ReadRate(float *rate_dps);
 
 /**
-  * @brief Convert a raw 16-bit rate sample into an integrated angle in degrees.
-  * @param raw_rate 16-bit two's-complement rate in LSB.
+  * @brief Convert a raw 24-bit rate sample into an integrated angle in degrees.
+  * @param raw_rate 24-bit two's-complement rate in LSB.
   * @param sample_time_us Monotonic 1 MHz-based timestamp in microseconds.
   * @param angle_deg Output angle wrapped to [-180, 180).
+  * @note The calibrated zero-rate bias is subtracted before integration.
+  *       Rates beyond the rated +/-100 deg/s range are clamped to full scale.
+  *       No valid angle is produced before calibration succeeds.
   */
 xv_status_t XV7001bb_ConvertRateToAngle(int32_t raw_rate,
                                         uint32_t sample_time_us,
