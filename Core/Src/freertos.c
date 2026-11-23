@@ -38,10 +38,6 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
-#define TASK_MAIN_SAMPLE_PERIOD_MS       10U
-#define TASK_MAIN_SLOW_PERIOD_CYCLES     50U
-#define TASK_MAIN_RETRY_CYCLES           50U
-
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -60,7 +56,7 @@ osThreadId task_mainHandle;
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
 
-static void xv7001bb_run_interface_checks(void);
+static uint8_t xv7001bb_run_interface_checks(void);
 
 /* USER CODE END FunctionPrototypes */
 
@@ -131,96 +127,45 @@ void MX_FREERTOS_Init(void) {
 void task_main(void const * argument)
 {
   /* USER CODE BEGIN task_main */
-  TickType_t previous_tick;
-  TickType_t last_wake_tick;
-  TickType_t current_tick;
-  uint32_t period_ticks;
-  uint32_t slow_counter = 0U;
-  uint8_t status_register;
-  float temperature_c;
-  float angle_deg;
+  uint8_t status_register = 0U;
+  uint8_t status_power_state;
+  uint8_t status_value_ok;
   xv_status_t status;
 
   (void)argument;
 
-  /*
-   * The sensor and this task start together at board power-up. Keep the
-   * required stabilization interval outside the driver so the SPI device
-   * layer has no RTOS dependency.
-   */
+  /* The sensor requires a 200 ms power-up interval before the first access. */
   vTaskDelay(pdMS_TO_TICKS(XV7001BB_POWER_UP_WAIT_MS));
 
   g_xv7001bb_task_debug.init_status = (uint32_t)XV7001bb_Init();
   if (g_xv7001bb_task_debug.init_status == (uint32_t)XV_OK)
   {
-    xv7001bb_run_interface_checks();
-  }
-
-  previous_tick = xTaskGetTickCount();
-  last_wake_tick = previous_tick;
-
-  /* Infinite loop */
-  for(;;)
-  {
-    vTaskDelayUntil(&last_wake_tick,
-                    pdMS_TO_TICKS(TASK_MAIN_SAMPLE_PERIOD_MS));
-
-    current_tick = xTaskGetTickCount();
-    period_ticks = (uint32_t)(current_tick - previous_tick);
-    previous_tick = current_tick;
-    g_xv7001bb_task_debug.period_ticks = period_ticks;
-    if (period_ticks > g_xv7001bb_task_debug.period_ticks_max)
-    {
-      g_xv7001bb_task_debug.period_ticks_max = period_ticks;
-    }
-    g_xv7001bb_task_debug.loop_count++;
-
-    if (g_xv7001bb_task_debug.init_status != (uint32_t)XV_OK)
-    {
-      if ((g_xv7001bb_task_debug.loop_count %
-           TASK_MAIN_RETRY_CYCLES) == 0U)
-      {
-        g_xv7001bb_task_debug.init_status =
-            (uint32_t)XV7001bb_Init();
-        if (g_xv7001bb_task_debug.init_status == (uint32_t)XV_OK)
-        {
-          xv7001bb_run_interface_checks();
-        }
-      }
-      continue;
-    }
-
-    status = XV7001bb_ReadAngle(&angle_deg);
-    g_xv7001bb_task_debug.read_angle_status = (uint32_t)status;
+    status = XV7001bb_ReadStatus(&status_register);
+    g_xv7001bb_task_debug.read_status_status = (uint32_t)status;
     if (status == XV_OK)
     {
-      g_xv7001bb_task_debug.angle_deg = angle_deg;
-      g_xv7001bb_task_debug.raw_rate = g_xv7001bb_debug.raw_rate;
-    }
-    else
-    {
-      g_xv7001bb_task_debug.error_count++;
+      g_xv7001bb_task_debug.status_raw = status_register;
     }
 
-    slow_counter++;
-    if (slow_counter >= TASK_MAIN_SLOW_PERIOD_CYCLES)
-    {
-      slow_counter = 0U;
+    status_power_state =
+        status_register & XV7001BB_STATUS_STATE_MASK;
+    status_value_ok = (uint8_t)(
+        (status == XV_OK) &&
+        ((status_register & XV7001BB_STATUS_PROCESS_OK) != 0U) &&
+        ((status_power_state == XV7001BB_STATUS_POR) ||
+         (status_power_state == XV7001BB_STATUS_STANDBY) ||
+         (status_power_state == XV7001BB_STATUS_SLEEP) ||
+         (status_power_state == XV7001BB_STATUS_SLEEP_OUT)));
 
-      status = XV7001bb_ReadStatus(&status_register);
-      g_xv7001bb_task_debug.read_status_status = (uint32_t)status;
-      if (status == XV_OK)
-      {
-        g_xv7001bb_task_debug.status_raw = status_register;
-      }
+    g_xv7001bb_task_debug.interface_check_complete =
+        xv7001bb_run_interface_checks();
+    g_xv7001bb_task_debug.interface_check_complete &=
+        status_value_ok;
+  }
 
-      status = XV7001bb_ReadTmp(&temperature_c);
-      g_xv7001bb_task_debug.read_tmp_status = (uint32_t)status;
-      if (status == XV_OK)
-      {
-        g_xv7001bb_task_debug.temperature_c = temperature_c;
-      }
-    }
+  for (;;)
+  {
+    vTaskDelay(pdMS_TO_TICKS(1000U));
   }
   /* USER CODE END task_main */
 }
@@ -228,98 +173,51 @@ void task_main(void const * argument)
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
 
-static void xv7001bb_run_interface_checks(void)
+static uint8_t xv7001bb_run_interface_checks(void)
 {
-  uint8_t value;
-  int32_t raw_rate;
-  float temperature_c;
-  float rate_dps;
-  float angle_deg;
+  uint8_t interface_ctl = 0U;
+  uint8_t output_ctl = 0U;
+  uint8_t filter_ctl = 0U;
+  float temperature_c = 0.0f;
+  float angle_deg = 0.0f;
   uint32_t all_ok = 1U;
+  xv_status_t status;
 
-  /*
-   * Re-write the same non-destructive LPF value so WriteData is exercised
-   * explicitly from task_main, then verify every public read interface.
-   */
-  g_xv7001bb_task_debug.write_test_status =
-      (uint32_t)XV7001bb_WriteData(XV7001BB_REG_DSP_CTL2, 0x01U);
+  status = XV7001bb_WriteData(XV7001BB_REG_DSP_CTL2, 0x01U);
+  g_xv7001bb_task_debug.write_test_status = (uint32_t)status;
+  all_ok &= (uint32_t)(status == XV_OK);
 
-  g_xv7001bb_task_debug.read_reg_control_status =
-      (uint32_t)XV7001bb_ReadReg(XV7001BB_REG_INTERFACE_CTL, &value);
-  if (g_xv7001bb_task_debug.read_reg_control_status == (uint32_t)XV_OK)
-  {
-    g_xv7001bb_task_debug.interface_ctl = value;
-  }
+  status = XV7001bb_ReadReg(XV7001BB_REG_INTERFACE_CTL,
+                            &interface_ctl);
+  g_xv7001bb_task_debug.read_reg_control_status = (uint32_t)status;
+  g_xv7001bb_task_debug.interface_ctl = interface_ctl;
+  all_ok &= (uint32_t)((status == XV_OK) && (interface_ctl == 0x00U));
 
-  g_xv7001bb_task_debug.read_reg_output_status =
-      (uint32_t)XV7001bb_ReadReg(XV7001BB_REG_OUTPUT_CTL, &value);
-  if (g_xv7001bb_task_debug.read_reg_output_status == (uint32_t)XV_OK)
-  {
-    g_xv7001bb_task_debug.output_ctl = value;
-  }
+  status = XV7001bb_ReadReg(XV7001BB_REG_OUTPUT_CTL, &output_ctl);
+  g_xv7001bb_task_debug.read_reg_output_status = (uint32_t)status;
+  g_xv7001bb_task_debug.output_ctl = output_ctl;
+  all_ok &= (uint32_t)((status == XV_OK) && (output_ctl == 0x01U));
 
-  g_xv7001bb_task_debug.read_reg_filter_status =
-      (uint32_t)XV7001bb_ReadReg(XV7001BB_REG_DSP_CTL2, &value);
-  if (g_xv7001bb_task_debug.read_reg_filter_status == (uint32_t)XV_OK)
-  {
-    g_xv7001bb_task_debug.filter_ctl = value;
-  }
+  status = XV7001bb_ReadReg(XV7001BB_REG_DSP_CTL2, &filter_ctl);
+  g_xv7001bb_task_debug.read_reg_filter_status = (uint32_t)status;
+  g_xv7001bb_task_debug.filter_ctl = filter_ctl;
+  all_ok &= (uint32_t)((status == XV_OK) && (filter_ctl == 0x01U));
 
-  g_xv7001bb_task_debug.read_status_status =
-      (uint32_t)XV7001bb_ReadStatus(&value);
-  if (g_xv7001bb_task_debug.read_status_status == (uint32_t)XV_OK)
-  {
-    g_xv7001bb_task_debug.status_raw = value;
-  }
+  status = XV7001bb_ReadTmp(&temperature_c);
+  g_xv7001bb_task_debug.read_tmp_status = (uint32_t)status;
+  g_xv7001bb_task_debug.temperature_c = temperature_c;
+  all_ok &= (uint32_t)((status == XV_OK) &&
+                       (temperature_c >= -40.0f) &&
+                       (temperature_c <= 125.0f));
 
-  g_xv7001bb_task_debug.read_tmp_status =
-      (uint32_t)XV7001bb_ReadTmp(&temperature_c);
-  if (g_xv7001bb_task_debug.read_tmp_status == (uint32_t)XV_OK)
-  {
-    g_xv7001bb_task_debug.temperature_c = temperature_c;
-  }
+  status = XV7001bb_ReadAngle(&angle_deg);
+  g_xv7001bb_task_debug.read_angle_status = (uint32_t)status;
+  g_xv7001bb_task_debug.angle_deg = angle_deg;
+  all_ok &= (uint32_t)((status == XV_OK) &&
+                       (angle_deg >= -180.0f) &&
+                       (angle_deg < 180.0f));
 
-  g_xv7001bb_task_debug.read_raw_rate_status =
-      (uint32_t)XV7001bb_ReadRawRate(&raw_rate);
-  if (g_xv7001bb_task_debug.read_raw_rate_status == (uint32_t)XV_OK)
-  {
-    g_xv7001bb_task_debug.raw_rate = raw_rate;
-  }
-
-  g_xv7001bb_task_debug.read_rate_status =
-      (uint32_t)XV7001bb_ReadRate(&rate_dps);
-  if (g_xv7001bb_task_debug.read_rate_status == (uint32_t)XV_OK)
-  {
-    g_xv7001bb_task_debug.rate_dps = rate_dps;
-  }
-
-  g_xv7001bb_task_debug.read_angle_status =
-      (uint32_t)XV7001bb_ReadAngle(&angle_deg);
-  if (g_xv7001bb_task_debug.read_angle_status == (uint32_t)XV_OK)
-  {
-    g_xv7001bb_task_debug.angle_deg = angle_deg;
-  }
-
-  all_ok &= (uint32_t)(g_xv7001bb_task_debug.write_test_status ==
-                       (uint32_t)XV_OK);
-  all_ok &= (uint32_t)(g_xv7001bb_task_debug.read_reg_control_status ==
-                       (uint32_t)XV_OK);
-  all_ok &= (uint32_t)(g_xv7001bb_task_debug.read_reg_output_status ==
-                       (uint32_t)XV_OK);
-  all_ok &= (uint32_t)(g_xv7001bb_task_debug.read_reg_filter_status ==
-                       (uint32_t)XV_OK);
-  all_ok &= (uint32_t)(g_xv7001bb_task_debug.read_status_status ==
-                       (uint32_t)XV_OK);
-  all_ok &= (uint32_t)(g_xv7001bb_task_debug.read_tmp_status ==
-                       (uint32_t)XV_OK);
-  all_ok &= (uint32_t)(g_xv7001bb_task_debug.read_raw_rate_status ==
-                       (uint32_t)XV_OK);
-  all_ok &= (uint32_t)(g_xv7001bb_task_debug.read_rate_status ==
-                       (uint32_t)XV_OK);
-  all_ok &= (uint32_t)(g_xv7001bb_task_debug.read_angle_status ==
-                       (uint32_t)XV_OK);
-
-  g_xv7001bb_task_debug.interface_check_complete = all_ok;
+  return (uint8_t)(all_ok != 0U);
 }
 
 /* USER CODE END Application */

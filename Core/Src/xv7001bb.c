@@ -329,7 +329,7 @@ xv_status_t XV7001bb_ReadRawRate(int32_t *raw_rate)
   }
   return XV_OK;
 }
-
+// 将原始角速度转换为角度，单位为度。
 xv_status_t XV7001bb_ReadRate(float *rate_dps)
 {
   int32_t raw_rate;
